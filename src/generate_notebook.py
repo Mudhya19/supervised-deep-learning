@@ -1,14 +1,3 @@
-"""
-generate_notebook.py
-====================
-Script ini secara otomatis membuat file Jupyter Notebook
-"Ball Trajectory Prediction.ipynb" yang berisi seluruh pipeline
-UTS Deep Learning dari Soal 1 hingga Soal 7.
-
-Jalankan dengan:
-    .\.venv\Scripts\python.exe src\generate_notebook.py
-"""
-
 import nbformat as nbf
 import os
 
@@ -21,430 +10,452 @@ nb.metadata.kernelspec = {
 
 cells = []
 
-# ═══════════════════════════════════════════
-# CELL 0: JUDUL & PENDAHULUAN
-# ═══════════════════════════════════════════
+# CELL 0: JUDUL & SETUP
 cells.append(nbf.v4.new_markdown_cell("""\
 # 🏀 Ball Trajectory Prediction using Deep Learning
-
 ## Ujian Tengah Semester (UTS) - Deep Learning (Kelas B)
 
-**Tujuan Proyek:**  
-Memprediksi trajektori (lintasan koordinat X dan Y) bola basket di masa depan berdasarkan rekaman pergerakan di beberapa frame sebelumnya dalam sebuah video, menggunakan arsitektur Deep Learning berbasis sekuensial: **Simple RNN**, **LSTM**, dan **GRU**.
+**Deskripsi Tugas:**  
+Membangun model Deep Learning berbasis Supervised Learning untuk memprediksi trajektori bola basket.
 
-**Pipeline End-to-End:**
-1. Ekstraksi & Tracking Objek (YOLOv8)
-2. Data Engineering - CSV Exporter
-3. Train/Test Split Kronologis
-4. Sliding Window & Tensor
-5. Arsitektur Model (RNN, LSTM, GRU)
-6. Evaluasi Kurva Training
-7. Pengujian & Komparasi Trajektori
-
----
+**Fase 1: Persiapan Dataset & Ekstraksi Tracking**
+Pada fase awal ini, kita akan:
+1. Mengiris (Crop) video mentah menjadi berdurasi ~6000 frame (sekitar 3 menit 20 detik) pada bagian aktivitas tertinggi.
+2. Mendeteksi dan melacak pergerakan objek bola secara simultan menggunakan YOLOv8.
 """))
 
-# ═══════════════════════════════════════════
-# CELL 1: IMPORT LIBRARY
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_markdown_cell("""\
-## 📦 Import Library
-
-Mengimpor seluruh pustaka yang dibutuhkan untuk Computer Vision, Data Engineering, Deep Learning, dan Visualisasi.
-"""))
-
+# CELL 1: IMPORT LIBRARY & VIDEO CROPPER
 cells.append(nbf.v4.new_code_cell("""\
 import cv2
 import pandas as pd
 import numpy as np
 import os
-import joblib
+import shutil
 import warnings
 import matplotlib.pyplot as plt
-import seaborn as sns
-
-import torch
-import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error
+from tqdm.auto import tqdm
+from collections import deque
 from ultralytics import YOLO
 
 warnings.filterwarnings('ignore')
 
-# Pindahkan working directory ke root proyek (karena notebook ada di folder notebooks/)
-os.chdir('..')
+# Memastikan Working Directory
+if os.path.basename(os.path.abspath('.')) == 'notebooks':
+    os.chdir('..')
 
-# Membuat direktori output
+# Membuat direktori yang dibutuhkan
 os.makedirs('data/raw', exist_ok=True)
-os.makedirs('data/processed/tensors', exist_ok=True)
-os.makedirs('models', exist_ok=True)
-os.makedirs('images/output', exist_ok=True)
+os.makedirs('images/output/tracking_samples', exist_ok=True)
 
-print("✅ Seluruh library berhasil diimpor!")
-print(f"   PyTorch version : {torch.__version__}")
-print(f"   Device          : {'CUDA (GPU)' if torch.cuda.is_available() else 'CPU'}")
+print("✅ Setup Lingkungan Selesai.")
+
+# ============================================
+# PRA-PEMROSESAN: PEMOTONGAN VIDEO 6000 FRAME
+# ============================================
+raw_video_path = 'docs/3 Basketball Bouncing.mp4'
+cropped_video_path = 'docs/3 Basketball Bouncing_3min.mp4'
+
+# Kita buat selalu regenerate jika belum ada, atau jika frame-nya belum 6000
+need_crop = True
+if os.path.exists(cropped_video_path):
+    cap_check = cv2.VideoCapture(cropped_video_path)
+    if int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT)) >= 6000:
+        need_crop = False
+    cap_check.release()
+
+if need_crop:
+    print("⏳ Memotong video menjadi durasi 6000 Frame (Mulai dari Menit 08:30)...")
+    cap = cv2.VideoCapture(raw_video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    start_frame = int(8.5 * 60 * fps) # Menit 08:30
+    end_frame   = start_frame + 6000  # Total 6000 frame (~3 menit 20 detik)
+    
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(cropped_video_path, fourcc, fps, (width, height))
+    
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    current_frame = start_frame
+    
+    while cap.isOpened() and current_frame <= end_frame:
+        ret, frame = cap.read()
+        if not ret: break
+        out.write(frame)
+        current_frame += 1
+        
+    cap.release()
+    out.release()
+    print("✅ Video berhasil dipotong menjadi 6000 Frame!")
+else:
+    print("✅ Video berdurasi 6000 Frame sudah siap digunakan!")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 2: SOAL 1 - TRACKING YOLO
-# ═══════════════════════════════════════════
+# CELL 2: BAGIAN 1 MARKDOWN
 cells.append(nbf.v4.new_markdown_cell("""\
 ---
-## 📌 Soal 1 — Ekstraksi & Tracking Objek (Bobot: 15%)
+## 📌 Bagian 1 — Ekstraksi & Tracking Objek
 
-Menggunakan `model.track()` dari **YOLOv8** untuk mendeteksi dan melacak 3 objek bola basket secara simultan di seluruh frame video. Algoritma tracker **BoT-SORT** digunakan agar setiap bola mendapatkan ID unik yang persisten (tidak bertukar).
-
-**Parameter Kunci:**
-- `persist=True` → Menjaga riwayat tracking antar frame
-- `classes=[32]` → Hanya mendeteksi *sports ball* (COCO class ID 32)
-- `tracker="botsort.yaml"` → Algoritma BoT-SORT untuk tracking multi-objek
+### 1.1 YOLO TRACKING — Deteksi & Lacak 3 Bola Basket
+Untuk mengekstraksi titik kordinat, kami mendeploy **YOLOv8** dengan algoritma *Multi-Object Tracking* **BoT-SORT** untuk melacak hingga **3 bola simultan** (dan objek keempat jika masuk *frame*).
+* **Targeting (`classes=[32]`)**: Memblokir noise, fokus pada bola olahraga.
+* **Persistent Identity (`persist=True`)**: Mencegah ID tertukar saat bola bersilangan.
+* **Trajectory Tailing**: Menggambar "ekor lintasan" grafik gerak bola untuk validasi Trajektori.
 """))
 
+# CELL 3: SOAL 1 CODE (TRACKING)
 cells.append(nbf.v4.new_code_cell("""\
 # ============================================
-# SOAL 1: EKSTRAKSI & TRACKING OBJEK (YOLOv8)
+# IMPLEMENTASI 1.1: ADVANCED YOLO TRACKING
 # ============================================
 
-# Memuat model YOLOv8 Nano (ringan & cepat)
 model_yolo = YOLO('yolov8n.pt')
-
-# Path video
-video_path = 'docs/3 Basketball Bouncing.mp4'
-assert os.path.exists(video_path), f"Video tidak ditemukan di: {video_path}"
+video_path = 'docs/3 Basketball Bouncing_3min.mp4'
 
 cap = cv2.VideoCapture(video_path)
-fps = cap.get(cv2.CAP_PROP_FPS)
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-duration = total_frames / fps
-
-print(f"📹 Info Video:")
-print(f"   FPS          : {fps}")
-print(f"   Total Frame  : {total_frames}")
-print(f"   Durasi       : {duration:.1f} detik ({duration/60:.1f} menit)")
-"""))
-
-# ═══════════════════════════════════════════
-# CELL 3: SOAL 2 - EKSTRAKSI KOORDINAT & CSV
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📌 Soal 2 — Data Engineering: CSV Exporter (Bobot: 10%)
-
-Mengekstrak titik tengah koordinat (Center X, Center Y) dari bounding box setiap bola, lalu menyimpannya ke file CSV.
-
-**Rumus Titik Tengah:**
-$$X_{center} = \\frac{x_{min} + x_{max}}{2}, \\quad Y_{center} = \\frac{y_{min} + y_{max}}{2}$$
-"""))
-
-cells.append(nbf.v4.new_code_cell("""\
-# ============================================
-# SOAL 1 & 2: TRACKING + EKSPOR CSV
-# ============================================
 
 tracking_data = []
+confidence_scores = []
 frame_id = 0
 
-print("⏳ Memulai proses tracking (ini memakan waktu beberapa menit)...")
+# Bersihkan direktori tracking_samples sebelumnya agar tidak bentrok dengan sisa file lama
+for f in os.listdir('images/output/tracking_samples'):
+    os.remove(os.path.join('images/output/tracking_samples', f))
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        break
+# Target frame untuk diambil sebagai sample (mengikuti contoh 4 gambar)
+target_frames = [100, 1350, 2700, 4050]
 
-    # Tracking dengan BoT-SORT, hanya class "sports ball"
-    results = model_yolo.track(
-        frame, persist=True, classes=[32],
-        tracker="botsort.yaml", verbose=False
-    )
+# Memori Dinamis Ekor Trajektori
+trajectories = {} 
+colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)] # 4 Warna
 
-    if results[0].boxes is not None and results[0].boxes.id is not None:
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        track_ids = results[0].boxes.id.cpu().numpy()
+print("⏳ Memulai eksekusi Computer Vision Tracking...")
 
-        for box, track_id in zip(boxes, track_ids):
-            x_min, y_min, x_max, y_max = box
+with tqdm(total=total_frames, desc="Processing Video", unit="frame") as pbar:
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret: break
 
-            # Menghitung titik koordinat pusat bola
-            center_x = (x_min + x_max) / 2.0
-            center_y = (y_min + y_max) / 2.0
+        # Deteksi dengan YOLO
+        results = model_yolo.track(frame, persist=True, classes=[32], tracker="botsort.yaml", conf=0.3, iou=0.5, verbose=False)
+        annotated_frame = results[0].plot()
 
-            tracking_data.append({
-                'Frame_ID': frame_id,
-                'Ball_ID': int(track_id),
-                'Center_X': center_x,
-                'Center_Y': center_y
-            })
+        num_balls = len(results[0].boxes) if results[0].boxes is not None else 0
+        if results[0].boxes is not None and results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            track_ids = results[0].boxes.id.cpu().numpy()
+            confs = results[0].boxes.conf.cpu().numpy()
 
-    frame_id += 1
-    if frame_id % 2000 == 0:
-        print(f"   ✔ Telah memproses {frame_id}/{total_frames} frame...")
+            for box, track_id, conf in zip(boxes, track_ids, confs):
+                t_id = int(track_id)
+                confidence_scores.append(float(conf))
+                
+                center_x = int((box[0] + box[2]) / 2.0)
+                center_y = int((box[1] + box[3]) / 2.0)
+                
+                if t_id not in trajectories:
+                    trajectories[t_id] = deque(maxlen=30)
+                trajectories[t_id].append((center_x, center_y))
+                
+                # Menggambar ekor
+                color = colors[(t_id-1) % len(colors)]
+                pts = list(trajectories[t_id])
+                for i in range(1, len(pts)):
+                    thickness = int(np.sqrt(64 / float(i + 1)) * 2.5)
+                    cv2.line(annotated_frame, pts[i - 1], pts[i], color, thickness)
+                
+                tracking_data.append({
+                    'Frame_ID': frame_id, 
+                    'Ball_ID': t_id,
+                    'Center_X': center_x,
+                    'Center_Y': center_y,
+                    'BBox_X1': int(box[0]),
+                    'BBox_Y1': int(box[1]),
+                    'BBox_X2': int(box[2]),
+                    'BBox_Y2': int(box[3]),
+                    'Confidence': float(conf)
+                })
+
+        # --- SMART FRAME CAPTURE (Menangkap Frame Spesifik) ---
+        if frame_id in target_frames:
+            # Gunakan format padding angka nol agar file berurutan
+            out_path = f'images/output/tracking_samples/frame_{frame_id:04d}_balls_{num_balls}.jpg'
+            cv2.imwrite(out_path, annotated_frame) 
+            tqdm.write(f"   📸 [SMART CAPTURE] Frame {frame_id} ditangkap dengan {num_balls} bola terdeteksi!")
+
+        frame_id += 1
+        pbar.update(1)
 
 cap.release()
 
-# Konversi ke DataFrame dan simpan CSV
-df_tracking = pd.DataFrame(tracking_data)
+# Ekspor Dataset CSV untuk keperluan training Deep Learning (Soal 2 & 3)
 csv_path = 'data/raw/dataset_koordinat_bola.csv'
+df_tracking = pd.DataFrame(tracking_data)
 df_tracking.to_csv(csv_path, index=False)
 
-print(f"\\n✅ Tracking selesai!")
-print(f"   Total titik koordinat : {len(df_tracking)}")
-print(f"   Ball ID terdeteksi    : {sorted(df_tracking['Ball_ID'].unique())}")
-print(f"   File CSV tersimpan di : {csv_path}")
+print(f"\\n✅ Dataset koordinat tersimpan di: {csv_path}")
+print(f"✅ Tahap Tracking (Bagian 1.1) Selesai!")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 4: PRATINJAU DATA
-# ═══════════════════════════════════════════
+# CELL 4: MARKDOWN ANALYSIS
 cells.append(nbf.v4.new_markdown_cell("""\
-### 📊 Pratinjau Dataset Hasil Tracking
+### 1.2 Analisis Hasil Tracking
+Validasi statistik untuk mengukur tingkat kepercayaan (*confidence level*) model dalam membedakan identitas bola.
 """))
 
+# CELL 5: CODE ANALYSIS
 cells.append(nbf.v4.new_code_cell("""\
-# Menampilkan pratinjau data
-df_tracking = pd.read_csv('data/raw/dataset_koordinat_bola.csv')
-print(f"Shape DataFrame: {df_tracking.shape}")
-print(f"\\nDistribusi deteksi per Bola:")
-print(df_tracking['Ball_ID'].value_counts())
-print(f"\\n5 Baris Pertama:")
-df_tracking.head(10)
+# ============================================
+# IMPLEMENTASI 1.2: ANALISIS STATISTIK
+# ============================================
+
+total_detections = len(tracking_data)
+unique_ids = sorted(list(set([d['Ball_ID'] for d in tracking_data])))
+avg_conf = np.mean(confidence_scores) * 100 if confidence_scores else 0
+
+print("📊 ANALISIS STATISTIK TRACKING YOLOv8:")
+print(f"  ▪ Total Titik Deteksi     : {total_detections:,} bounding boxes")
+print(f"  ▪ Rata-Rata Confidence    : {avg_conf:.2f}%")
+print(f"  ▪ ID Bola Terdaftar       : {unique_ids} (Sebanyak {len(unique_ids)} Objek)")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 5: SOAL 3 - TRAIN/TEST SPLIT
-# ═══════════════════════════════════════════
+# CELL 6: MARKDOWN VISUALIZATION
 cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📌 Soal 3 — Data Engineering: Train/Test Split Kronologis (Bobot: 10%)
+### 1.3 Visualisasi: Sample Frame dengan Tracking
+Merupakan bukti empiris (visual) penangkapan frame secara spesifik. Keempat gambar tersebut disatukan secara simetris ke dalam sebuah *grid* visualisasi.
+"""))
 
-Data dibagi **berdasarkan urutan waktu (kronologis)**, bukan secara acak (*random split*).
+# CELL 7: CODE VISUALIZATION
+cells.append(nbf.v4.new_code_cell("""\
+# ============================================
+# IMPLEMENTASI 1.3: VISUALISASI 4 GAMBAR DISATUKAN
+# ============================================
+sample_dir = 'images/output/tracking_samples'
+if os.path.exists(sample_dir):
+    sample_files = sorted([f for f in os.listdir(sample_dir) if f.startswith('frame_') and 'balls' in f])
+    
+    if len(sample_files) > 0:
+        print("📷 Visualisasi 4 Gambar Sample Bukti (Disatukan):")
+        # Membuat grid 2x2 untuk menampung maksimal 4 gambar
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        fig.suptitle('Sample Frame dengan YOLO Tracking', fontsize=18, fontweight='bold')
+        axes = axes.flatten()
+        
+        for idx, file in enumerate(sample_files):
+            if idx >= 4: break # Batasi maksimal 4 grid
+            
+            img_rgb = cv2.cvtColor(cv2.imread(os.path.join(sample_dir, file)), cv2.COLOR_BGR2RGB)
+            axes[idx].imshow(img_rgb)
+            axes[idx].axis('off')
+            
+            # Parsing nama file: frame_0100_balls_1.jpg
+            # string.split('_') -> ['frame', '0100', 'balls', '1.jpg']
+            parts = file.split("_")
+            f_id = int(parts[1])
+            b_count = parts[3].split(".")[0]
+            
+            axes[idx].set_title(f'Frame {f_id} — {b_count} bola terdeteksi', fontweight='bold', fontsize=14)
+        
+        # Kosongkan sisa axis jika objek terdeteksi < 4
+        for i in range(len(sample_files), 4):
+            axes[i].axis('off')
+            
+        plt.subplots_adjust(hspace=0.3, wspace=0.05, top=0.92)
+        plt.show()
+    else:
+        print("Belum ada sample frame yang berhasil ditangkap.")
+"""))
 
-| Bagian | Proporsi | Keterangan |
-|--------|----------|------------|
-| **Data Latih (Train)** | 66.6% frame awal | ~2 menit pertama video |
-| **Data Uji (Test)** | 33.3% frame akhir | ~1 menit terakhir video |
+cells.append(nbf.v4.new_markdown_cell("""\
+### Bagian 2 — Data Engineering: CSV Exporter
+Tahap ini bertujuan untuk mengekstrak titik tengah koordinat (X, Y) dari hasil tracking beserta ID uniknya, lalu menyimpannya dalam satu Dataframe terpadu sesuai mandat soal nomor 2.
 
-> ⚠️ **Mengapa bukan Random Split?**  
-> Karena trajektori bola adalah data **deret waktu (time-series)**. Jika diacak, model akan "menyontek" masa depan untuk mempelajari masa lalu (*Data Leakage*), menghasilkan akurasi palsu yang tidak berguna di dunia nyata.
+**Inspeksi Data Mentah (Raw Data):** Memastikan tabel berisikan kolom esensial seperti `Frame_ID`, `Ball_ID`, `Center_X`, dan `Center_Y`.
 """))
 
 cells.append(nbf.v4.new_code_cell("""\
 # ============================================
-# SOAL 3: TRAIN/TEST SPLIT KRONOLOGIS
+# IMPLEMENTASI SOAL 2: CSV EXPORTER
 # ============================================
+import pandas as pd
+import numpy as np
 
-df = pd.read_csv('data/raw/dataset_koordinat_bola.csv')
-df = df.sort_values(by=['Ball_ID', 'Frame_ID'])
+csv_path = 'data/raw/dataset_koordinat_bola.csv'
+try:
+    df_tracking = pd.read_csv(csv_path)
+    print(f"✅ Berhasil memuat dataset: {csv_path}")
+    print(f"Total Baris Data: {len(df_tracking):,} records")
+    display(df_tracking.head())
+except Exception as e:
+    print(f"⚠️ Gagal memuat dataset, pastikan sel pelacakan sebelumnya sudah dijalankan! Error: {e}")
+"""))
 
-# Ambil 3 Bola utama dengan kemunculan paling banyak
-top_balls = df['Ball_ID'].value_counts().nlargest(3).index
-df = df[df['Ball_ID'].isin(top_balls)].copy()
+cells.append(nbf.v4.new_markdown_cell("""\
+### Bagian 3 — Data Engineering: Train/Test Split
+Sesuai soal nomor 3, dataset sekuensial **tidak boleh** dibagi secara acak (random split) untuk mencegah *data leakage* antar waktu. Pembagian dilakukan secara **kronologis temporal**:
+- **Data Latih (Train)**: 66.6% frame awal (Siklus pergerakan masa lalu)
+- **Data Uji (Test)**: 33.3% frame akhir (Siklus pergerakan masa depan)
 
-print(f"3 Ball ID utama yang dipilih: {sorted(top_balls)}")
-print(f"Total data setelah filter  : {len(df)} baris")
+Serta penerapan normalisasi spasial menggunakan `MinMaxScaler`.
+"""))
 
-# Split kronologis di titik 66.6%
-max_frame = df['Frame_ID'].max()
-split_frame = int(max_frame * 0.666)
+cells.append(nbf.v4.new_code_cell("""\
+# ============================================
+# IMPLEMENTASI SOAL 3: TRAIN/TEST SPLIT KRONOLOGIS
+# ============================================
+from sklearn.preprocessing import MinMaxScaler
+import joblib
+import os
 
-train_df = df[df['Frame_ID'] <= split_frame].copy()
-test_df  = df[df['Frame_ID'] > split_frame].copy()
+os.makedirs('models', exist_ok=True)
 
-print(f"\\n📊 Hasil Pembagian Data:")
-print(f"   Batas frame split    : {split_frame} dari {max_frame}")
-print(f"   Data Latih (Train)   : {len(train_df)} baris ({len(train_df)/len(df)*100:.1f}%)")
-print(f"   Data Uji (Test)      : {len(test_df)} baris ({len(test_df)/len(df)*100:.1f}%)")
+# 1. Pastikan terurut berdasarkan Ball_ID dan Kronologi Waktu (Frame_ID)
+df_tracking = df_tracking.sort_values(by=['Ball_ID', 'Frame_ID']).reset_index(drop=True)
 
-# Normalisasi MinMaxScaler (stabilitas gradien Neural Network)
+# 2. Split 66.6% Train, 33.3% Test
+train_ratio = 0.666
+split_idx = int(len(df_tracking) * train_ratio)
+
+train_df = df_tracking.iloc[:split_idx].copy()
+test_df = df_tracking.iloc[split_idx:].copy()
+
+print("--- Pembagian Kronologis Temporal ---")
+print(f"Data Latih : {len(train_df):,} observasi")
+print(f"Data Uji   : {len(test_df):,} observasi")
+
+# 3. Normalisasi Koordinat (X, Y)
+features = ['Center_X', 'Center_Y']
 scaler = MinMaxScaler()
-train_df[['Center_X', 'Center_Y']] = scaler.fit_transform(train_df[['Center_X', 'Center_Y']])
-test_df[['Center_X', 'Center_Y']]  = scaler.transform(test_df[['Center_X', 'Center_Y']])
 
-# Simpan scaler untuk inverse transform nanti
+# Fit hanya pada Data Latih untuk mencegah kebocoran informasi masa depan (Data Leakage)
+train_df[features] = scaler.fit_transform(train_df[features])
+test_df[features] = scaler.transform(test_df[features])
+
+# Simpan scaler
 joblib.dump(scaler, 'models/scaler.pkl')
-print("\\n✅ Normalisasi MinMaxScaler selesai & disimpan.")
+print("\\n✅ Scaler berhasil disimpan di 'models/scaler.pkl'")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 6: SOAL 4 - SLIDING WINDOW
-# ═══════════════════════════════════════════
 cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📌 Soal 4 — Data Engineering: Sliding Window & Dimensi Tensor (Bobot: 15%)
+### Bagian 4 — Data Engineering: Sliding Window
+Model *Neural Network* berarsitektur *Sequence Modeling* memerlukan *input* berbentuk format 3D: `(batch_size, sequence_length, features)`.
+Kita menggunakan algoritma **Sliding Window** dengan **look-back window = 10**, artinya model akan mengobservasi *history* 10 frame ke belakang untuk memprediksi probabilitas posisi 1 frame berikutnya.
 
-Teknik **Sliding Window** digunakan untuk mengubah data tabular menjadi struktur tensor 3D yang bisa dicerna oleh model RNN/LSTM/GRU.
-
-**Konsep:**
-- **Input (X):** Koordinat bola dari `t` hingga `t+9` (10 frame ke belakang)
-- **Target (Y):** Koordinat bola di frame `t+10` (1 frame ke depan)
-
-**Dimensi Tensor Akhir:**
-```
-X : (Jumlah_Sampel, Time_Steps, Features) → (N, 10, 2)
-Y : (Jumlah_Sampel, Features)             → (N, 2)
-```
-
-> 📝 **Catatan:** Data di-*group* per Ball_ID agar tidak ada window yang memotong lintas bola berbeda.
+Transformasi ini diproses secara terisolasi **per objek bola (Ball_ID)** agar trajektori bola yang satu tidak memengaruhi *sequence* bola lainnya.
 """))
 
 cells.append(nbf.v4.new_code_cell("""\
 # ============================================
-# SOAL 4: SLIDING WINDOW & TENSOR
+# IMPLEMENTASI SOAL 4: SLIDING WINDOW
 # ============================================
+def create_sequences(data, seq_length=10):
+    xs, ys = [], []
+    for i in range(len(data) - seq_length):
+        x = data.iloc[i:(i+seq_length)][features].values
+        y = data.iloc[i+seq_length][features].values
+        xs.append(x)
+        ys.append(y)
+    return np.array(xs), np.array(ys)
 
-def create_sliding_window(dataset, look_back=10):
-    \"\"\"
-    Transformasi data deret waktu spasial menjadi pasangan Tensor Input/Output.
-    
-    Parameters:
-        dataset  : DataFrame dengan kolom [Ball_ID, Center_X, Center_Y]
-        look_back: Jumlah frame ke belakang sebagai konteks
-    
-    Returns:
-        X : np.array shape (N, look_back, 2)
-        Y : np.array shape (N, 2)
-    \"\"\"
-    X, Y = [], []
-    for ball_id, group in dataset.groupby('Ball_ID'):
-        coords = group[['Center_X', 'Center_Y']].values
-        for i in range(len(coords) - look_back):
-            X.append(coords[i:(i + look_back)])
-            Y.append(coords[i + look_back])
-    return np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32)
+seq_length = 10
+X_train_list, y_train_list = [], []
+X_test_list, y_test_list = [], []
 
-LOOK_BACK = 10
+# Transformasi per Ball_ID (Mencegah overlapping lintasan)
+for ball_id in train_df['Ball_ID'].unique():
+    b_df = train_df[train_df['Ball_ID'] == ball_id]
+    if len(b_df) > seq_length:
+        x, y = create_sequences(b_df, seq_length)
+        X_train_list.append(x)
+        y_train_list.append(y)
 
-X_train, y_train = create_sliding_window(train_df, look_back=LOOK_BACK)
-X_test,  y_test  = create_sliding_window(test_df,  look_back=LOOK_BACK)
+for ball_id in test_df['Ball_ID'].unique():
+    b_df = test_df[test_df['Ball_ID'] == ball_id]
+    if len(b_df) > seq_length:
+        x, y = create_sequences(b_df, seq_length)
+        X_test_list.append(x)
+        y_test_list.append(y)
 
-# Simpan tensor ke disk
+X_train = np.vstack(X_train_list)
+y_train = np.vstack(y_train_list)
+X_test = np.vstack(X_test_list)
+y_test = np.vstack(y_test_list)
+
+os.makedirs('data/processed/tensors', exist_ok=True)
 np.save('data/processed/tensors/X_train.npy', X_train)
 np.save('data/processed/tensors/y_train.npy', y_train)
-np.save('data/processed/tensors/X_test.npy',  X_test)
-np.save('data/processed/tensors/y_test.npy',  y_test)
+np.save('data/processed/tensors/X_test.npy', X_test)
+np.save('data/processed/tensors/y_test.npy', y_test)
 
-print("📐 BENTUK DIMENSI TENSOR AKHIR:")
-print(f"   Format : (Jumlah_Sampel, Time_Steps, Features)")
-print(f"")
-print(f"   X_train : {X_train.shape}")
-print(f"   y_train : {y_train.shape}")
-print(f"   X_test  : {X_test.shape}")
-print(f"   y_test  : {y_test.shape}")
-print(f"\\n✅ Tensor disimpan ke data/processed/tensors/")
+print(f"🎯 Dimensi Tensor Latih : X={X_train.shape}, y={y_train.shape}")
+print(f"🎯 Dimensi Tensor Uji   : X={X_test.shape}, y={y_test.shape}")
+print("✅ Tensor sequence berhasil diekspor secara permanen!")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 7: SOAL 5 - ARSITEKTUR MODEL
-# ═══════════════════════════════════════════
 cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📌 Soal 5 — Arsitektur Model: Simple RNN, LSTM, GRU (Bobot: 20%)
-
-Membangun 3 arsitektur Deep Learning berbasis sekuensial menggunakan **PyTorch**:
-
-| Arsitektur | Keunggulan | Kelemahan |
-|-----------|------------|-----------|
-| **Simple RNN** | Sederhana, cepat dilatih | Rentan *Vanishing Gradient*, sulit menangkap pola jangka panjang |
-| **LSTM** | Memori jangka panjang via *gates* (Input, Forget, Output) | Lebih lambat, butuh data lebih banyak |
-| **GRU** | Efisien (hanya 2 *gates*: Reset, Update), performa mendekati LSTM | Sedikit kurang fleksibel dari LSTM pada kasus tertentu |
-
-**Konfigurasi:**
-- `input_dim = 2` (koordinat X, Y)
-- `hidden_dim = 32` (neuron tersembunyi)
-- `output_dim = 2` (prediksi X, Y berikutnya)
+### Bagian 5 — Arsitektur Model (Simple RNN, LSTM, GRU)
+Membangun dan mengeksekusi proses pelatihan (*training loop*) untuk 3 arsitektur fundamental JST Rekuren menggunakan **PyTorch**:
+1. **Simple RNN**: Pendekatan dasar, efisien namun rentan terhadap *Vanishing Gradient*.
+2. **LSTM**: Memiliki mekanisme *gates* untuk memori jangka panjang (*Long-Term Dependency*).
+3. **GRU**: Varian penyederhanaan LSTM dengan performa komputasi yang lebih lincah dan kompetitif.
 """))
 
 cells.append(nbf.v4.new_code_cell("""\
 # ============================================
-# SOAL 5: ARSITEKTUR MODEL (RNN, LSTM, GRU)
+# IMPLEMENTASI SOAL 5: PEMBUATAN 3 MODEL & TRAINING
 # ============================================
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
 
-class SimpleRNN(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=32, output_dim=2):
-        super(SimpleRNN, self).__init__()
-        self.rnn = nn.RNN(input_dim, hidden_dim, batch_first=True)
-        self.fc  = nn.Linear(hidden_dim, output_dim)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Komputasi diproses menggunakan: {device}")
 
+# Konversi NumPy -> PyTorch Tensor
+X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
+y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
+X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
+y_test_t = torch.tensor(y_test, dtype=torch.float32).to(device)
+
+train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=64, shuffle=True)
+test_loader = DataLoader(TensorDataset(X_test_t, y_test_t), batch_size=64, shuffle=False)
+
+# Kelas Pembungkus Arsitektur (Multi-Architecture Support)
+class TrajectoryNet(nn.Module):
+    def __init__(self, rnn_type, input_size=2, hidden_size=64, output_size=2):
+        super(TrajectoryNet, self).__init__()
+        if rnn_type == 'RNN':
+            self.rnn = nn.RNN(input_size, hidden_size, batch_first=True)
+        elif rnn_type == 'LSTM':
+            self.rnn = nn.LSTM(input_size, hidden_size, batch_first=True)
+        elif rnn_type == 'GRU':
+            self.rnn = nn.GRU(input_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        
     def forward(self, x):
         out, _ = self.rnn(x)
-        out = self.fc(out[:, -1, :])  # Ambil output time-step terakhir
+        out = out[:, -1, :] # Ambil output probabilitas dari timestep terakhir
+        out = self.fc(out)
         return out
 
+models = {
+    'Simple_RNN': TrajectoryNet('RNN').to(device),
+    'LSTM': TrajectoryNet('LSTM').to(device),
+    'GRU': TrajectoryNet('GRU').to(device)
+}
 
-class LSTMModel(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=32, output_dim=2):
-        super(LSTMModel, self).__init__()
-        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
-        self.fc   = nn.Linear(hidden_dim, output_dim)
+criterion = nn.MSELoss()
+epochs = 50
+history = {name: {'train_loss': [], 'val_loss': []} for name in models}
 
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.fc(out[:, -1, :])
-        return out
-
-
-class GRUModel(nn.Module):
-    def __init__(self, input_dim=2, hidden_dim=32, output_dim=2):
-        super(GRUModel, self).__init__()
-        self.gru = nn.GRU(input_dim, hidden_dim, batch_first=True)
-        self.fc  = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        out, _ = self.gru(x)
-        out = self.fc(out[:, -1, :])
-        return out
-
-
-print("✅ 3 arsitektur model berhasil didefinisikan!")
-print()
-
-# Ringkasan parameter tiap model
-for name, Model in [("Simple RNN", SimpleRNN), ("LSTM", LSTMModel), ("GRU", GRUModel)]:
-    m = Model()
-    total = sum(p.numel() for p in m.parameters())
-    print(f"   {name:12s} → {total:,} parameter")
-"""))
-
-# ═══════════════════════════════════════════
-# CELL 8: SOAL 6 - TRAINING & KURVA LOSS
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📌 Soal 6 — Evaluasi Proses Training & Kurva Loss (Bobot: 10%)
-
-Melatih ketiga model menggunakan fungsi loss **MSE (Mean Squared Error)** dan optimizer **Adam**. Kurva pergerakan *Training Loss* vs *Validation Loss* divisualisasikan untuk mendiagnosis:
-
-- **Overfitting** → Train loss rendah, Validation loss naik
-- **Underfitting** → Kedua loss masih tinggi
-- **Good Fit** → Kedua loss turun dan stabil bersisian
-"""))
-
-cells.append(nbf.v4.new_code_cell("""\
-# ============================================
-# SOAL 6: TRAINING & EVALUASI KURVA LOSS
-# ============================================
-
-# Konversi ke PyTorch Tensor
-X_train_t = torch.from_numpy(X_train)
-y_train_t = torch.from_numpy(y_train)
-X_val_t   = torch.from_numpy(X_test)
-y_val_t   = torch.from_numpy(y_test)
-
-train_loader = DataLoader(
-    TensorDataset(X_train_t, y_train_t),
-    batch_size=16, shuffle=True
-)
-
-def train_model(model, name, epochs=150, lr=0.01):
-    \"\"\"Melatih model dan mengembalikan history loss.\"\"\"
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    train_losses, val_losses = [], []
-
-    print(f"\\n🔄 Training: {name}")
+print("\\n🚀 Memulai Proses Pelatihan Model...")
+for name, model in models.items():
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
     for epoch in range(epochs):
-        # --- Training Phase ---
         model.train()
         epoch_loss = 0
         for batch_x, batch_y in train_loader:
@@ -453,255 +464,123 @@ def train_model(model, name, epochs=150, lr=0.01):
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item() * batch_x.size(0)
-
-        train_loss = epoch_loss / len(X_train_t)
-        train_losses.append(train_loss)
-
-        # --- Validation Phase ---
+            epoch_loss += loss.item()
+            
         model.eval()
+        val_loss = 0
         with torch.no_grad():
-            val_pred = model(X_val_t)
-            val_loss = criterion(val_pred, y_val_t).item()
-            val_losses.append(val_loss)
-
-        if (epoch + 1) % 50 == 0:
-            print(f"   Epoch {epoch+1:3d}/{epochs} │ "
-                  f"Train Loss: {train_loss:.6f} │ "
-                  f"Val Loss: {val_loss:.6f}")
-
-    # Simpan bobot model
+            for batch_x, batch_y in test_loader:
+                outputs = model(batch_x)
+                loss = criterion(outputs, batch_y)
+                val_loss += loss.item()
+                
+        history[name]['train_loss'].append(epoch_loss / len(train_loader))
+        history[name]['val_loss'].append(val_loss / len(test_loader))
+        
     torch.save(model.state_dict(), f'models/{name}.pth')
-    return train_losses, val_losses
-
-
-# Inisialisasi & Latih ketiga model
-rnn_model  = SimpleRNN()
-lstm_model = LSTMModel()
-gru_model  = GRUModel()
-
-loss_history = {}
-loss_history['Simple_RNN'] = train_model(rnn_model,  "Simple_RNN")
-loss_history['LSTM']       = train_model(lstm_model, "LSTM")
-loss_history['GRU']        = train_model(gru_model,  "GRU")
-
-print("\\n✅ Seluruh model selesai dilatih & bobot tersimpan di folder models/")
+    print(f"✅ {name} Selesai dilatih! (Final Val Loss: {val_loss/len(test_loader):.4f}) -> models/{name}.pth")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 9: VISUALISASI KURVA LOSS
-# ═══════════════════════════════════════════
 cells.append(nbf.v4.new_markdown_cell("""\
-### 📈 Visualisasi Kurva Pergerakan Loss (Training vs Validation)
+### Bagian 6 — Evaluasi Proses Training (Loss Curves)
+Menganalisis performa model selama masa *training* dengan melukiskan grafik metrik kesalahan (*Training vs Validation Loss*). Hal ini krusial untuk mengidentifikasi konvergensi fitur model atau terjebak dalam *overfitting/underfitting*.
 """))
 
 cells.append(nbf.v4.new_code_cell("""\
-# Visualisasi Kurva Loss
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+# ============================================
+# IMPLEMENTASI SOAL 6: KURVA LOSS TRAINING
+# ============================================
+import matplotlib.pyplot as plt
 
-colors = {'Simple_RNN': '#3498db', 'LSTM': '#2ecc71', 'GRU': '#e74c3c'}
+plt.figure(figsize=(18, 5))
+for idx, name in enumerate(models.keys(), 1):
+    plt.subplot(1, 3, idx)
+    plt.plot(history[name]['train_loss'], label='Train Loss', color='blue')
+    plt.plot(history[name]['val_loss'], label='Val Loss', color='orange')
+    plt.title(f'Kurva Konvergensi - {name}', fontweight='bold')
+    plt.xlabel('Epochs')
+    plt.ylabel('Mean Squared Error (MSE)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
 
-for i, (name, (train_l, val_l)) in enumerate(loss_history.items()):
-    ax = axes[i]
-    epochs_range = range(1, len(train_l) + 1)
-
-    ax.plot(epochs_range, train_l, label='Training Loss',
-            color=colors[name], linewidth=2)
-    ax.plot(epochs_range, val_l, label='Validation Loss',
-            color='orange', linewidth=2, linestyle='--')
-
-    ax.set_title(f'Kurva Loss — {name.replace("_", " ")}',
-                 fontsize=13, fontweight='bold')
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('MSE Loss')
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-
-plt.suptitle('Perbandingan Kurva Training vs Validation Loss',
-             fontsize=15, fontweight='bold', y=1.02)
 plt.tight_layout()
-plt.savefig('images/output/loss_curves.png', dpi=300, bbox_inches='tight')
+os.makedirs('images/output', exist_ok=True)
+plt.savefig('images/output/loss_curves.png', dpi=300)
 plt.show()
-
-print("✅ Grafik kurva loss disimpan ke: images/output/loss_curves.png")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 10: ANALISIS KURVA (MARKDOWN)
-# ═══════════════════════════════════════════
 cells.append(nbf.v4.new_markdown_cell("""\
-### 🔍 Analisis Kurva Loss
+### Bagian 7 — Pengujian & Komparasi Trajektori
+Langkah pamungkas: Mengevaluasi performa numerik komparatif pada Data Uji tak terlihat (MSE dan RMSE), serta memvisualisasikan *Spatial Predictive Power* model dibandingkan dengan trajektori *Ground Truth*.
 
-**Pengamatan:**
-- **Simple RNN:** Training loss turun cepat namun validation loss cenderung fluktuatif → indikasi *overfitting* ringan. Model ini kesulitan mempertahankan informasi momentum bola jangka panjang karena *vanishing gradient*.
-- **LSTM:** Training loss turun, namun validation loss tidak stabil dan cenderung meningkat di epoch akhir → *overfitting* yang lebih parah. Kompleksitas 3 gerbang (input, forget, output) memerlukan data latih yang lebih besar untuk konvergen optimal.
-- **GRU:** Kedua kurva turun dan mendekati konvergensi → *good fit*. Arsitektur yang lebih sederhana (hanya 2 gerbang: reset & update) membuatnya lebih efisien dalam belajar pola dengan volume data yang terbatas.
-"""))
-
-# ═══════════════════════════════════════════
-# CELL 11: SOAL 7 - EVALUASI & KOMPARASI
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📌 Soal 7 — Pengujian & Komparasi Trajektori (Bobot: 20%)
-
-Menguji ketiga model pada **Data Uji** (1 menit terakhir video), menghitung metrik **MSE** dan **RMSE**, serta membuat plot perbandingan lintasan 2D (Sumbu X vs Sumbu Y).
+Sebagai validasi empiris sesuai arahan, kita akan membedah plot plot 2D (Sumbu X dan Y) spesifik untuk **ID Bola Dominan** (misalnya Bola 1).
 """))
 
 cells.append(nbf.v4.new_code_cell("""\
 # ============================================
-# SOAL 7: PENGUJIAN & KOMPARASI
+# IMPLEMENTASI SOAL 7: KOMPARASI & VISUALISASI TRAJEKTORI
 # ============================================
+import math
 
-# Memuat scaler untuk inverse transform
-scaler = joblib.load('models/scaler.pkl')
-
-# Dictionary model yang sudah terlatih
-trained_models = {
-    'Simple RNN': rnn_model,
-    'LSTM': lstm_model,
-    'GRU': gru_model
-}
-
-results = []
-predictions = {}
-
-# Ground truth dalam skala piksel asli
-y_test_original = scaler.inverse_transform(y_test)
-
-for name, model in trained_models.items():
+results_list = []
+for name, model in models.items():
     model.eval()
     with torch.no_grad():
-        preds_scaled = model(X_val_t).numpy()
+        preds = model(X_test_t)
+        mse = criterion(preds, y_test_t).item()
+        rmse = math.sqrt(mse)
+        results_list.append({'Model': name, 'MSE': mse, 'RMSE': rmse})
 
-    # Inverse transform ke koordinat piksel asli
-    preds_original = scaler.inverse_transform(preds_scaled)
-    predictions[name] = preds_original
+df_results = pd.DataFrame(results_list)
+print("🏆 TABEL KOMPARASI PERFORMA EVALUASI AKHIR:")
+display(df_results.sort_values(by='RMSE').reset_index(drop=True))
 
-    mse  = mean_squared_error(y_test_original, preds_original)
-    rmse = np.sqrt(mse)
-    results.append({
-        'Arsitektur Model': name,
-        'MSE': round(mse, 2),
-        'RMSE': round(rmse, 2)
-    })
+# ----------------------------------------------------
+# PLOT VISUALISASI TRAJEKTORI (2D SPATIAL X vs Y)
+# ----------------------------------------------------
+# Ambil entitas bola yang eksis dan paling stabil (dominan) di data test
+ball_id_target = test_df['Ball_ID'].mode()[0]
+ball_df = test_df[test_df['Ball_ID'] == ball_id_target]
 
-df_results = pd.DataFrame(results).sort_values(by='RMSE')
+if len(ball_df) > seq_length:
+    X_b, y_b = create_sequences(ball_df, seq_length)
+    X_b_t = torch.tensor(X_b, dtype=torch.float32).to(device)
+    
+    plt.figure(figsize=(10, 8))
+    
+    # Transformasi balik (Inverse) Ground Truth agar pixel kembali normal
+    y_b_inv = scaler.inverse_transform(y_b)
+    plt.plot(y_b_inv[:, 0], y_b_inv[:, 1], 'k-', label='Ground Truth (Asli)', linewidth=4, alpha=0.5)
+    
+    colors_plt = ['red', 'green', 'blue']
+    for idx, (name, model) in enumerate(models.items()):
+        model.eval()
+        with torch.no_grad():
+            preds_b = model(X_b_t).cpu().numpy()
+            preds_b_inv = scaler.inverse_transform(preds_b)
+            plt.plot(preds_b_inv[:, 0], preds_b_inv[:, 1], '--', color=colors_plt[idx], label=f'Prediksi {name}', linewidth=2)
 
-print("=" * 60)
-print("  TABEL KOMPARASI EVALUASI (Data Uji — Piksel Asli)")
-print("=" * 60)
-print(df_results.to_string(index=False))
-print()
-
-best = df_results.iloc[0]['Arsitektur Model']
-best_rmse = df_results.iloc[0]['RMSE']
-print(f"🏆 Model Terbaik: {best} (RMSE = {best_rmse} piksel)")
+    plt.title(f'Komparasi Lintasan Prediksi vs Aktual (Bola ID: {ball_id_target})', fontweight='bold', fontsize=16)
+    plt.xlabel('Sumbu Resolusi X (Pixel)', fontsize=12)
+    plt.ylabel('Sumbu Resolusi Y (Pixel)', fontsize=12)
+    
+    # Sangat Penting: Plot Y di-invert karena titik 0,0 pada OpenCV image mapping berada di pojok kiri atas
+    plt.gca().invert_yaxis() 
+    
+    plt.legend(fontsize=12, shadow=True)
+    plt.grid(True, linestyle=':')
+    plt.tight_layout()
+    plt.savefig('images/output/trajectory_comparison.png', dpi=300)
+    plt.show()
+else:
+    print(f"⚠️ Data Bola ID {ball_id_target} tidak mencukupi untuk render plot 2D.")
 """))
 
-# ═══════════════════════════════════════════
-# CELL 12: TABEL METRIK BERGAYA
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_code_cell("""\
-# Tabel metrik dalam bentuk DataFrame (tampilan di notebook)
-df_results.style.highlight_min(
-    subset=['MSE', 'RMSE'],
-    color='#2ecc71',
-    props='font-weight: bold'
-).set_caption("Tabel Komparasi Metrik Evaluasi pada Data Uji")
-"""))
-
-# ═══════════════════════════════════════════
-# CELL 13: PLOT TRAJEKTORI 2D
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_markdown_cell("""\
-### 🗺️ Visualisasi Trajektori 2D (Koordinat X vs Y)
-
-Plot di bawah ini menampilkan perbandingan lintasan bola yang sesungguhnya (*Ground Truth*) dengan lintasan hasil prediksi masing-masing model.
-"""))
-
-cells.append(nbf.v4.new_code_cell("""\
-# Plot Trajektori 2D: Prediksi vs Ground Truth
-fig, ax = plt.subplots(figsize=(12, 7))
-
-# Ground Truth
-ax.plot(y_test_original[:, 0], y_test_original[:, 1],
-        'k--', label='Ground Truth (Lintasan Asli)',
-        linewidth=3, alpha=0.8)
-ax.scatter(y_test_original[0, 0], y_test_original[0, 1],
-           color='black', s=100, zorder=5, marker='o', label='Titik Awal')
-
-# Prediksi tiap model
-style = {
-    'Simple RNN': {'color': '#3498db', 'marker': 's'},
-    'LSTM':       {'color': '#2ecc71', 'marker': '^'},
-    'GRU':        {'color': '#e74c3c', 'marker': 'D'},
-}
-
-for name, preds in predictions.items():
-    ax.plot(preds[:, 0], preds[:, 1],
-            label=f'Prediksi {name}',
-            color=style[name]['color'],
-            linewidth=2, alpha=0.85)
-    ax.scatter(preds[:, 0], preds[:, 1],
-               color=style[name]['color'],
-               marker=style[name]['marker'],
-               s=20, alpha=0.5)
-
-ax.set_title('Komparasi Lintasan Bola\\n(Koordinat X vs Koordinat Y)',
-             fontsize=15, fontweight='bold')
-ax.set_xlabel('Koordinat Horizontal (X) — Piksel', fontsize=12)
-ax.set_ylabel('Koordinat Vertikal (Y) — Piksel', fontsize=12)
-ax.legend(fontsize=11, loc='best')
-ax.grid(True, alpha=0.3)
-ax.invert_yaxis()  # Sumbu Y dibalik karena koordinat layar (0,0) di kiri atas
-
-plt.tight_layout()
-plt.savefig('images/output/trajectory_comparison.png', dpi=300, bbox_inches='tight')
-plt.show()
-
-print("✅ Grafik trajektori disimpan ke: images/output/trajectory_comparison.png")
-"""))
-
-# ═══════════════════════════════════════════
-# CELL 14: KESIMPULAN AKHIR
-# ═══════════════════════════════════════════
-cells.append(nbf.v4.new_markdown_cell("""\
----
-## 📝 Kesimpulan Akhir
-
-Berdasarkan seluruh eksperimen yang telah dilakukan, berikut adalah temuan utama:
-
-### 🏆 Arsitektur Terbaik: **GRU (Gated Recurrent Unit)**
-
-| Aspek | Temuan |
-|-------|--------|
-| **Performa Metrik** | GRU menghasilkan RMSE terkecil, artinya jarak rata-rata simpangan prediksi terhadap posisi bola sesungguhnya adalah yang paling kecil |
-| **Kurva Training** | GRU menunjukkan konvergensi paling stabil antara training dan validation loss |
-| **Efisiensi Arsitektur** | GRU hanya memiliki 2 gerbang (Reset & Update) dibanding LSTM yang memiliki 3 gerbang, sehingga lebih efisien untuk dataset berukuran sedang |
-
-### 🔬 Analisis Perbandingan Arsitektur
-
-1. **Simple RNN** terbukti kewalahan dalam mempertahankan memori lintasan bola jangka panjang karena rentan terhadap masalah **Vanishing Gradient** — gradien sinyal error mengecil eksponensial seiring bertambahnya jarak time-step.
-
-2. **LSTM** memiliki mekanisme memori yang canggih (3 gates + cell state), namun kompleksitas ini justru menjadi bumerang ketika volume data latih terbatas. Model membutuhkan lebih banyak data untuk mengkalibrasi seluruh parameternya secara optimal, sehingga pada dataset kita mengalami **overfitting**.
-
-3. **GRU** menjadi **sweet spot** — ia menggabungkan keunggulan memori berjangka dari LSTM namun dengan penyederhanaan arsitektur. Hanya dengan 2 gerbang (Reset dan Update), GRU lebih gesit mempelajari momentum dan inersia pantulan bola, menghasilkan prediksi trajektori yang paling akurat.
-
----
-*Proyek UTS Deep Learning — Ball Trajectory Prediction*
-"""))
-
-# ═══════════════════════════════════════════
-# MENYUSUN NOTEBOOK
-# ═══════════════════════════════════════════
+# PENULISAN FILE NOTEBOOK
 nb.cells = cells
-
 output_path = "notebooks/Ball Trajectory Prediction.ipynb"
-os.makedirs("notebooks", exist_ok=True)
 
 with open(output_path, "w", encoding="utf-8") as f:
     nbf.write(nb, f)
 
-print(f"[OK] Notebook berhasil dibuat: {output_path}")
-print("     Buka dengan Jupyter atau VS Code untuk menjalankannya.")
+print(f"[OK] Notebook End-To-End berhasil dibangun dan disimpan ke {output_path}")
