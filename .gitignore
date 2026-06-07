@@ -23,3 +23,6 @@ Thumbs.db
 
 # Logs
 runs/
+
+# File berukuran besar
+*.mp4

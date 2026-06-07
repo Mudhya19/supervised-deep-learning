@@ -1,0 +1,5 @@
+fps=30.0
+total_frames=5399
+width=1280
+height=720
+duration_sec=179.97

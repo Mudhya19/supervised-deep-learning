@@ -248,15 +248,15 @@ Secara konseptual, `generate_notebook.py` sebaiknya memiliki komponen berikut:
 - penyusun urutan cell,
 - writer/exporter notebook ke folder `notebooks/`.
 
-## Penyesuaian dengan Kondisi Folder Saat Ini
+## Penyesuaian dengan Kondisi Folder Saat Ini (Reset)
 
-Berdasarkan struktur folder yang sudah ada, rancangan notebook harus memanfaatkan artefak yang telah tersedia sebagai berikut:
-- dataset koordinat sudah tersedia pada `data/raw/dataset_koordinat_bola.csv`, sehingga notebook bisa tetap menjelaskan proses tracking dan exporter sebagai tahapan metodologis, lalu menggunakan file itu sebagai input utama analisis;
-- tensor hasil preprocessing sudah tersedia pada `data/processed/tensors/`, sehingga notebook dapat memuat bagian regenerasi tensor atau validasi tensor yang ada;
-- model terlatih sudah tersedia pada `models/`, sehingga notebook dapat mendukung skenario training ulang maupun loading model yang sudah ada;
-- visual output tracking, loss curve, dan trajectory comparison sudah tersedia pada `images/output/`, sehingga notebook dapat menampilkan, memverifikasi, dan menginterpretasikan artefak tersebut.
+Berdasarkan struktur folder terbaru yang baru saja di-reset dan dibersihkan dari artefak lama, kondisi saat ini adalah **bersih (kosong)** pada direktori output. Oleh karena itu, rancangan notebook harus:
+- **Mengeksekusi ulang seluruh pipeline dari awal**, termasuk ekstraksi koordinat untuk menghasilkan `data/raw/dataset_koordinat_bola.csv`;
+- Membangun dan mengekspor tensor ulang ke dalam `data/processed/tensors/`;
+- Melatih model dari awal (dari nol) karena direktori `models/` dalam keadaan kosong, lalu menyimpan bobot `Simple_RNN.pth`, `LSTM.pth`, dan `GRU.pth` beserta `scaler.pkl` setelah training selesai;
+- Memproduksi ulang seluruh visualisasi baik itu *tracking demo*, *loss curve*, maupun plot *trajectory comparison* dan menyimpannya ke `images/output/`.
 
-Namun, meskipun beberapa hasil sudah ada, notebook tetap harus ditulis seolah-olah seluruh pipeline dapat direproduksi secara utuh dari awal sampai akhir.
+Notebook harus benar-benar ditulis dan dieksekusi secara **End-to-End reproducible pipeline**, di mana setiap sel yang dijalankan akan mengisi kembali kekosongan pada struktur folder yang telah disiapkan.
 
 ## Gaya Penulisan yang Diinginkan
 
