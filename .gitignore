@@ -26,3 +26,6 @@ runs/
 
 # File berukuran besar
 *.mp4
+
+# File disembunyikan
+docs/konsep_arsitektur_uts_deep_learning.md
